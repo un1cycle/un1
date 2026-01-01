@@ -1,2 +1,2 @@
-# popcorn
-A language for writing virtual x86_64 kernels
+# un1-C
+My personal dialect of C
