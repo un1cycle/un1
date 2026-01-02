@@ -131,6 +131,7 @@ public:
 enum class parse_error {
   NO_MATCH_FOUND = 100,
   UNBALANCED_BRACES,
+  OUT_OF_CODE,
   // pratt errors = 200 in this same enum
 };
 
@@ -163,6 +164,7 @@ enum class parse_error {
 std::expected<std::unique_ptr<Node>, parse_error>
 pratt_parse(std::unique_ptr<Node> root, const std::vector<token> &buffer_lex) {
   for (int i = 0; i < buffer_lex.size(); ++i) {
+    // incomplete!
   }
 
   return std::move(root);
@@ -178,9 +180,11 @@ std::expected<std::unique_ptr<Node>, parse_error> handle_control_flow_keyword(
     const std::string &keyword) { // i means current index
   std::vector<token> temp_buffer = {};
   i++;
-  while (buffer_lex[i].value != "{") {
+  while (true) {
     if (i >= buffer_lex.size())
       return std::unexpected(parse_error::UNBALANCED_BRACES);
+    if (buffer_lex[i].value == "{")
+      break;
     temp_buffer.push_back(
         buffer_lex[i]); // means you didn't open if statement code
     i++;
@@ -203,9 +207,11 @@ std::expected<std::unique_ptr<Node>, parse_error> handle_control_flow_keyword(
   temp_buffer = {};
   i++;
   int bracket_count = 1;
-  while (bracket_count != 0) {
+  while (true) {
     if (i >= buffer_lex.size())
       return std::unexpected(parse_error::UNBALANCED_BRACES);
+    if (bracket_count == 0)
+      break;
     if (buffer_lex[i].value == "{") // means overstepped buffer length
       bracket_count++;
     else if (buffer_lex[i].value == "}")
@@ -214,6 +220,8 @@ std::expected<std::unique_ptr<Node>, parse_error> handle_control_flow_keyword(
     temp_buffer.push_back(buffer_lex[i]);
     i++;
   } // now buffer_lex[    i - 1   ].value == "}"
+
+  temp_buffer.pop_back();
 
   auto code_result = parse(std::move(root->left->right), temp_buffer, 0);
   if (!code_result.has_value()) {
@@ -232,10 +240,9 @@ std::expected<std::unique_ptr<Node>, parse_error> handle_control_flow_keyword(
 }
 
 std::expected<std::unique_ptr<Node>, parse_error>
-handle_all_control_flow_keywords(std::unique_ptr<Node> root,
-                                 const std::vector<token> &buffer_lex,
-                                 int index_begin,
-                                 int i) { // i means current index
+handle_all_control_flow(std::unique_ptr<Node> root,
+                        const std::vector<token> &buffer_lex, int index_begin,
+                        int i) { // i means current index
   if (buffer_lex[i].type == lex_types::WORD && buffer_lex[i].value == "if") {
     auto temp_root = handle_control_flow_keyword(std::move(root), buffer_lex,
                                                  index_begin, i, "if");
@@ -259,21 +266,48 @@ handle_all_control_flow_keywords(std::unique_ptr<Node> root,
       return std::unexpected(temp_root.error());
     root = std::move(*temp_root);
   }
+  // TODO: fix else and elif
+  // else if (buffer_lex[i].type == lex_types::WORD &&
+  //          buffer_lex[i].value == "else") {
+  //   auto temp_root = handle_control_flow_keyword(std::move(root), buffer_lex,
+  //                                                index_begin, i, "else");
+  //   if (!temp_root.has_value())
+  //     return std::unexpected(temp_root.error());
+  //   root = std::move(*temp_root);
+  // }
+  // else if (buffer_lex[i].type == lex_types::WORD &&
+  //          buffer_lex[i].value == "elif") {
+  //   auto temp_root = handle_control_flow_keyword(std::move(root), buffer_lex,
+  //                                                index_begin, i, "elif");
+  //   if (!temp_root.has_value())
+  //     return std::unexpected(temp_root.error());
+  //   root = std::move(*temp_root);
+  // }
+  else { // time to handle actual statements
+    std::vector<token> statement = {};
+    while (i < buffer_lex.size() && (buffer_lex[i].type != lex_types::SYMBOL ||
+                                     buffer_lex[i].value != ";")) {
+      statement.push_back(buffer_lex[i]);
+      ++i;
+    } // this ends on the ';'
 
-  else if (buffer_lex[i].type == lex_types::WORD &&
-           buffer_lex[i].value == "else") {
-    auto temp_root = handle_control_flow_keyword(std::move(root), buffer_lex,
-                                                 index_begin, i, "else");
+    auto temp_root = pratt_parse(
+        std::make_unique<Node>(root.get(), nullptr, nullptr), statement);
     if (!temp_root.has_value())
       return std::unexpected(temp_root.error());
-    root = std::move(*temp_root);
-  } else if (buffer_lex[i].type == lex_types::WORD &&
-             buffer_lex[i].value == "elif") {
-    auto temp_root = handle_control_flow_keyword(std::move(root), buffer_lex,
-                                                 index_begin, i, "elif");
-    if (!temp_root.has_value())
-      return std::unexpected(temp_root.error());
-    root = std::move(*temp_root);
+    root->left = std::move(*temp_root);
+
+    root->right = std::make_unique<Node>(nullptr, nullptr, nullptr);
+    auto later_code_result = parse(std::move(root->right), buffer_lex, i + 1);
+    if (!later_code_result.has_value()) {
+      return std::unexpected(later_code_result.error());
+    }
+    root->right = std::move(*later_code_result);
+    // what do now is throw the entire statement in the pratt parser,
+    // hook that parse up to the tree, and then start the continuing code on the
+    // right branch
+
+    // bugcheck in the morning
   }
   return std::move(root);
 }
@@ -282,16 +316,16 @@ std::expected<std::unique_ptr<Node>, parse_error>
 parse(std::unique_ptr<Node> root, const std::vector<token> &buffer_lex,
       int index_begin) {
   for (int i = index_begin; i < buffer_lex.size(); ++i) {
-    // C doesn't allow {} in its conditionals meaning that we can just use
-    // that as a range
-    auto temp_root = handle_all_control_flow_keywords(
-        std::move(root), buffer_lex, index_begin, i);
+    auto temp_root =
+        handle_all_control_flow(std::move(root), buffer_lex, index_begin, i);
 
     if (!temp_root.has_value())
       return std::unexpected(temp_root.error());
     root = std::move(*temp_root);
+
+    return std::move(root);
   }
-  return std::unexpected(parse_error::NO_MATCH_FOUND);
+  return std::move(root);
 }
 
 int main(int argc, char **argv) {
