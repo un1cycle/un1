@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include <expected>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -22,6 +23,22 @@ public:
 
   token(enum lex_types type, std::string value) : type(type), value(value) {}
 };
+
+class function {
+public:
+  std::string name;
+  std::string type;
+  std::vector<std::string> parameter_types;
+
+  function(std::string name, std::string type,
+           std::vector<std::string> parameter_types)
+      : name(name), type(type), parameter_types(parameter_types) {}
+};
+
+bool is_functional =
+    false; // if the user is in an fn function, they're functional. otherwise
+           // they're in an fx function and they're imperative.
+std::vector<function> functions;
 
 std::expected<std::vector<token>, lex_error>
 lex_code(const std::string &buffer) {
@@ -102,7 +119,7 @@ lex_code(const std::string &buffer) {
     if (found_matching_multi_character_symbol)
       continue;
 
-    if (buffer[i] == ' ') {
+    if (buffer[i] == ' ' || buffer[i] == '\n') {
       continue;
     }
 
@@ -131,6 +148,8 @@ public:
 enum class parse_error {
   NO_MATCH_FOUND = 100,
   UNBALANCED_BRACES,
+  UNBALANCED_PAREN,
+  NO_COLON_IN_FUNC_DECLARATION,
   OUT_OF_CODE,
   // pratt errors = 200 in this same enum
 };
@@ -160,13 +179,33 @@ enum class parse_error {
 //     return false;
 //   return true;
 // }
+std::expected<std::unique_ptr<Node>, parse_error>
+pratt_parse_fx(std::unique_ptr<Node> root,
+               const std::vector<token> &buffer_lex) {
+  return std::move(root);
+}
+
+std::expected<std::unique_ptr<Node>, parse_error>
+pratt_parse_fn(std::unique_ptr<Node> root,
+               const std::vector<token> &buffer_lex) {
+  return std::move(root);
+}
 
 std::expected<std::unique_ptr<Node>, parse_error>
 pratt_parse(std::unique_ptr<Node> root, const std::vector<token> &buffer_lex) {
-  for (int i = 0; i < buffer_lex.size(); ++i) {
-    // incomplete!
+  std::function<std::expected<std::unique_ptr<Node>, parse_error>(
+      std::unique_ptr<Node> root, const std::vector<token> &buffer_lex)>
+      to_call = pratt_parse_fx;
+
+  if (is_functional) {
+    to_call = pratt_parse_fn;
   }
 
+  auto result = to_call(std::move(root), buffer_lex);
+  if (!result.has_value()) {
+    return std::unexpected(result.error());
+  }
+  root = std::move(*result);
   return std::move(root);
 }
 
@@ -208,6 +247,148 @@ handle_control_flow_else(std::unique_ptr<Node> root,
     return std::unexpected(code_result.error());
   }
   root->left = std::move(*code_result);
+
+  root->right = std::make_unique<Node>(nullptr, nullptr, nullptr);
+  auto later_code_result =
+      recursive_parse(std::move(root->right), buffer_lex, i);
+  if (!later_code_result.has_value()) {
+    return std::unexpected(later_code_result.error());
+  }
+  root->right = std::move(*later_code_result);
+
+  return std::move(root);
+}
+
+std::expected<std::unique_ptr<Node>, parse_error>
+handle_function_keyword(std::unique_ptr<Node> root,
+                        const std::vector<token> &buffer_lex, int i,
+                        const std::string &keyword) { // i means current index
+  i++; // moves cursor to right after fn/fx keyword
+  std::string name = buffer_lex[i].value;
+  std::vector<std::string> parameter_types;
+  i += 2;
+  int paren_count = 1;
+  bool ready_for_type = true;
+  while (true) {
+    if (i >= buffer_lex.size())
+      return std::unexpected(parse_error::UNBALANCED_PAREN);
+    if (paren_count == 0)
+      break;
+
+    if (buffer_lex[i].value == "(") // means overstepped buffer length
+      paren_count++;
+    else if (buffer_lex[i].value == ")")
+      paren_count--;
+
+    if (ready_for_type)
+      parameter_types.push_back(buffer_lex[i].value);
+    if (buffer_lex[i].value == ",")
+      ready_for_type = true;
+    else
+      ready_for_type = false;
+    i++;
+  } // ends on right after ending parenthesis
+  if (buffer_lex[i].value != ":")
+    return std::unexpected(parse_error::NO_COLON_IN_FUNC_DECLARATION);
+  i++;
+  std::string type = buffer_lex[i].value;
+  functions.push_back({name, type, parameter_types});
+  i++; // now buffer_lex[i].value == "{"
+
+  root->attributes = {keyword}; // root->left->left should be conditional,
+                                // root->left->right should be code, root->right
+                                // should be rest of code
+  root->left = std::make_unique<Node>(root.get(), nullptr, nullptr);
+  std::vector<token> temp_buffer = {};
+  i++;
+  int bracket_count = 1;
+  while (true) {
+    if (i >= buffer_lex.size())
+      return std::unexpected(parse_error::UNBALANCED_BRACES);
+    if (bracket_count == 0)
+      break;
+    if (buffer_lex[i].value == "{") // means overstepped buffer length
+      bracket_count++;
+    else if (buffer_lex[i].value == "}")
+      bracket_count--;
+
+    temp_buffer.push_back(buffer_lex[i]);
+    i++;
+  } // now buffer_lex[    i - 1   ].value == "}"
+
+  temp_buffer.pop_back();
+
+  auto code_result = recursive_parse(std::move(root->left), temp_buffer, 0);
+  if (!code_result.has_value()) {
+    return std::unexpected(code_result.error());
+  }
+  root->left = std::move(*code_result);
+
+  root->right = std::make_unique<Node>(nullptr, nullptr, nullptr);
+  auto later_code_result =
+      recursive_parse(std::move(root->right), buffer_lex, i);
+  if (!later_code_result.has_value()) {
+    return std::unexpected(later_code_result.error());
+  }
+  root->right = std::move(*later_code_result);
+
+  return std::move(root);
+}
+std::expected<std::unique_ptr<Node>, parse_error>
+handle_match_keyword(std::unique_ptr<Node> root,
+                     const std::vector<token> &buffer_lex, int i,
+                     const std::string &keyword) { // i means current index
+  std::vector<token> temp_buffer = {};
+  i++;
+  while (true) {
+    if (i >= buffer_lex.size())
+      return std::unexpected(parse_error::UNBALANCED_BRACES);
+    if (buffer_lex[i].value == "{")
+      break;
+    temp_buffer.push_back(
+        buffer_lex[i]); // means you didn't open if statement code
+    i++;
+  } // now buffer_lex[i].value == "{"
+
+  root->attributes = {
+      keyword}; // root->left->left should be conditional, root->left->right
+                // should be code, root->right should be rest of code
+  root->left = std::make_unique<Node>(
+      root.get(), std::make_unique<Node>(nullptr, nullptr, nullptr),
+      std::make_unique<Node>(nullptr, nullptr, nullptr));
+  auto conditional_result =
+      pratt_parse(std::move(root->left->left), temp_buffer);
+  if (!conditional_result.has_value()) {
+    return std::unexpected(conditional_result.error());
+  }
+
+  root->left->left = std::move(*conditional_result);
+
+  temp_buffer = {};
+  i++;
+  int bracket_count = 1;
+  while (true) {
+    if (i >= buffer_lex.size())
+      return std::unexpected(parse_error::UNBALANCED_BRACES);
+    if (bracket_count == 0)
+      break;
+    if (buffer_lex[i].value == "{") // means overstepped buffer length
+      bracket_count++;
+    else if (buffer_lex[i].value == "}")
+      bracket_count--;
+
+    temp_buffer.push_back(buffer_lex[i]);
+    i++;
+  } // now buffer_lex[    i - 1   ].value == "}"
+
+  temp_buffer.pop_back();
+
+  auto code_result =
+      recursive_parse(std::move(root->left->right), temp_buffer, 0);
+  if (!code_result.has_value()) {
+    return std::unexpected(code_result.error());
+  }
+  root->left->right = std::move(*code_result);
 
   root->right = std::make_unique<Node>(nullptr, nullptr, nullptr);
   auto later_code_result =
@@ -325,6 +506,30 @@ handle_all_control_flow(std::unique_ptr<Node> root,
     if (!temp_root.has_value())
       return std::unexpected(temp_root.error());
     root = std::move(*temp_root);
+  } else if (buffer_lex[i].type == lex_types::WORD &&
+             buffer_lex[i].value == "fn") {
+    auto temp_root =
+        handle_function_keyword(std::move(root), buffer_lex, i, "fn");
+    if (!temp_root.has_value())
+      return std::unexpected(temp_root.error());
+    root = std::move(*temp_root);
+
+  } else if (buffer_lex[i].type == lex_types::WORD &&
+             buffer_lex[i].value == "fx") {
+    auto temp_root =
+        handle_function_keyword(std::move(root), buffer_lex, i, "fx");
+    if (!temp_root.has_value())
+      return std::unexpected(temp_root.error());
+    root = std::move(*temp_root);
+
+  } else if (buffer_lex[i].type == lex_types::WORD &&
+             buffer_lex[i].value == "match") {
+    auto temp_root =
+        handle_match_keyword(std::move(root), buffer_lex, i, "match");
+    if (!temp_root.has_value())
+      return std::unexpected(temp_root.error());
+    root = std::move(*temp_root);
+
   } else { // time to handle actual statements
     std::vector<token> statement = {};
     while (i < buffer_lex.size() && (buffer_lex[i].type != lex_types::SYMBOL ||
